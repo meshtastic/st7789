@@ -276,11 +276,11 @@ class ST7789Spi : public OLEDDisplay {
   }
   
   void displayOn(void) {
-  //sendCommand(DISPLAYON);
+    sendCommand(ST77XX_DISPON);
   }
 
   void displayOff(void) {
-  //sendCommand(DISPLAYOFF);
+    sendCommand(ST77XX_DISPOFF);
   }
   
 //#define ST77XX_MADCTL_MY 0x80
