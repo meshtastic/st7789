@@ -34,6 +34,15 @@
 #include "OLEDDisplay.h"
 #include <SPI.h>
 
+struct TFTColorRegion {
+    int16_t x;
+    int16_t y;
+    int16_t width;
+    int16_t height;
+    uint16_t onColorBe;
+    uint16_t offColorBe;
+    bool enabled = false;
+};
 
 #define ST_CMD_DELAY 0x80 // special signifier for command lists
 
@@ -106,6 +115,7 @@ class ST7789Spi : public OLEDDisplay {
       SPISettings 		    _spiSettings;
       uint16_t            _RGB=0xFFFF;
       uint8_t             _buffheight;
+      TFTColorRegion      *_colorRegions = nullptr;
 
       // Memory Data Access Control
       // Meshtastic firmware flips displays by default (legacy of the T-Beam)
@@ -158,6 +168,8 @@ class ST7789Spi : public OLEDDisplay {
     }
 
     void display(void) {
+      const uint16_t fallbackOnColorBe = ST77XX_WHITE;
+      const uint16_t fallbackOffColorBe = 0x0000;
     #ifdef OLEDDISPLAY_DOUBLE_BUFFER
 
        uint16_t minBoundY = UINT16_MAX;
@@ -202,9 +214,12 @@ class ST7789Spi : public OLEDDisplay {
               //setAddrWindow(y*8+temp,minBoundX,1,maxBoundX-minBoundX+1);
               uint32_t const pixbufcount = maxBoundX-minBoundX+1;
               uint16_t *pixbuf = (uint16_t *)rtos_malloc(2 * pixbufcount);
+              const int16_t pixelY = static_cast<int16_t>(y * 8 + temp);
               for (x = minBoundX; x <= maxBoundX; x++)
               {
-                pixbuf[x-minBoundX] = ((buffer[x + y * displayWidth]>>temp)&0x01)==1?_RGB:0;
+                    const bool pixelSet = ((buffer[x + y * displayWidth] >> temp) & 0x01) == 1;
+                    pixbuf[x - minBoundX] = resolveTFTColorPixel(static_cast<int16_t>(x), pixelY, pixelSet,
+                                                                           fallbackOnColorBe, fallbackOffColorBe);
               }
 #ifdef ESP_PLATFORM
               _spi->transferBytes((uint8_t *)pixbuf, NULL, 2 * pixbufcount);
@@ -230,10 +245,12 @@ class ST7789Spi : public OLEDDisplay {
               setAddrWindow(y*8+temp,0,1,displayWidth);
               uint32_t const pixbufcount = displayWidth;
               uint16_t *pixbuf = (uint16_t *)rtos_malloc(2 * pixbufcount);
+              const int16_t pixelY = static_cast<int16_t>(y * 8 + temp);
               for (x = 0; x < displayWidth; x++)
               {
-                pixbuf[x] = ((buffer[x + y * displayWidth]>>temp)&0x01)==1?_RGB:0;
-              }
+                    const bool pixelSet = ((buffer[x + y * displayWidth] >> temp) & 0x01) == 1;
+                    pixbuf[x] = resolveTFTColorPixel(static_cast<int16_t>(x), pixelY, pixelSet, fallbackOnColorBe,
+                                                               fallbackOffColorBe);              }
 #ifdef ESP_PLATFORM
               _spi->transferBytes((uint8_t *)pixbuf, NULL, 2 * pixbufcount);
 #else
@@ -269,9 +286,10 @@ class ST7789Spi : public OLEDDisplay {
 	delay(10);
   }
 
-  void setRGB(uint16_t c)
+  void setRGB(uint16_t c, TFTColorRegion *colorRegions = nullptr)
   {
-
+    //assert(colorRegions != nullptr);
+    this->_colorRegions = colorRegions;
     this->_RGB=0x00|c>>8|(c<<8&0xFF00);
   }
   
@@ -423,7 +441,20 @@ class ST7789Spi : public OLEDDisplay {
     this->displayBufferSize = displayWidth * _buffheight ;
   }
   
-
+uint16_t resolveTFTColorPixel(int16_t x, int16_t y, bool pixelSet, uint16_t fallbackOnColorBe, uint16_t fallbackOffColorBe)
+{
+uint8_t currentCount = 0;
+    while (_colorRegions != nullptr && _colorRegions[currentCount].enabled && currentCount < 48) {
+        const TFTColorRegion &region = _colorRegions[currentCount];
+        if (x >= region.x && x < (region.x + region.width) && y >= region.y && y < (region.y + region.height)) {
+              if (x == 20 && y == 20) {
+    }
+            return pixelSet ? region.onColorBe : region.offColorBe;
+        }
+        currentCount++;
+    }
+    return pixelSet ? fallbackOnColorBe : fallbackOffColorBe;
+}
 
 };
 
