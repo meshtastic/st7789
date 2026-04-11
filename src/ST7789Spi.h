@@ -116,6 +116,8 @@ class ST7789Spi : public OLEDDisplay {
       uint16_t            _RGB=0xFFFF;
       uint8_t             _buffheight;
       TFTColorRegion      *_colorRegions = nullptr;
+      uint32_t            _lastColorRegionHash = 0;
+      bool                _hadColorRegionsLastFrame = false;
 
       // Memory Data Access Control
       // Meshtastic firmware flips displays by default (legacy of the T-Beam)
@@ -170,6 +172,12 @@ class ST7789Spi : public OLEDDisplay {
     void display(void) {
       const uint16_t fallbackOnColorBe = _RGB;
       const uint16_t fallbackOffColorBe = 0x0000;
+      const bool hasColorRegions = _colorRegions != nullptr;
+      const uint32_t colorRegionHash = hasColorRegions ? hashColorRegions() : 0;
+      const bool colorRegionStateChanged = (hasColorRegions != _hadColorRegionsLastFrame) ||
+                                           (hasColorRegions && colorRegionHash != _lastColorRegionHash);
+      _hadColorRegionsLastFrame = hasColorRegions;
+      _lastColorRegionHash = colorRegionHash;
     #ifdef OLEDDISPLAY_DOUBLE_BUFFER
 
        uint16_t minBoundY = UINT16_MAX;
@@ -200,7 +208,15 @@ class ST7789Spi : public OLEDDisplay {
        // If the minBoundY wasn't updated
        // we can savely assume that buffer_back[pos] == buffer[pos]
        // holdes true for all values of pos
-       if (minBoundY == UINT16_MAX) return;
+       if (minBoundY == UINT16_MAX) {
+         if (!colorRegionStateChanged) {
+           return;
+         }
+         minBoundY = 0;
+         maxBoundY = _buffheight - 1;
+         minBoundX = 0;
+         maxBoundX = displayWidth - 1;
+       }
 
 		  set_CS(LOW);
 		  _spi->beginTransaction(_spiSettings);
@@ -460,6 +476,36 @@ uint16_t resolveTFTColorPixel(int16_t x, int16_t y, bool pixelSet, uint16_t fall
     }
 
     return pixelSet ? fallbackOnColorBe : fallbackOffColorBe;
+}
+
+uint32_t hashColorRegions() const
+{
+    uint32_t hash = 2166136261u; // FNV-1a
+
+    if (_colorRegions == nullptr) {
+        return hash;
+    }
+
+    for (uint8_t i = 0; i < 48; i++) {
+        const TFTColorRegion &region = _colorRegions[i];
+        if (!region.enabled) {
+            break;
+        }
+
+        const uint16_t fields[] = {static_cast<uint16_t>(region.x), static_cast<uint16_t>(region.y),
+                                   static_cast<uint16_t>(region.width), static_cast<uint16_t>(region.height),
+                                   region.onColorBe, region.offColorBe};
+
+        for (uint8_t fieldIndex = 0; fieldIndex < (sizeof(fields) / sizeof(fields[0])); fieldIndex++) {
+            const uint16_t value = fields[fieldIndex];
+            hash ^= static_cast<uint8_t>(value & 0xFF);
+            hash *= 16777619u;
+            hash ^= static_cast<uint8_t>((value >> 8) & 0xFF);
+            hash *= 16777619u;
+        }
+    }
+
+    return hash;
 }
 
 };
