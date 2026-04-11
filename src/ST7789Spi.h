@@ -168,7 +168,7 @@ class ST7789Spi : public OLEDDisplay {
     }
 
     void display(void) {
-      const uint16_t fallbackOnColorBe = ST77XX_WHITE;
+      const uint16_t fallbackOnColorBe = _RGB;
       const uint16_t fallbackOffColorBe = 0x0000;
     #ifdef OLEDDISPLAY_DOUBLE_BUFFER
 
@@ -443,16 +443,22 @@ class ST7789Spi : public OLEDDisplay {
   
 uint16_t resolveTFTColorPixel(int16_t x, int16_t y, bool pixelSet, uint16_t fallbackOnColorBe, uint16_t fallbackOffColorBe)
 {
-uint8_t currentCount = 0;
-    while (_colorRegions != nullptr && _colorRegions[currentCount].enabled && currentCount < 48) {
-        const TFTColorRegion &region = _colorRegions[currentCount];
-        if (x >= region.x && x < (region.x + region.width) && y >= region.y && y < (region.y + region.height)) {
-              if (x == 20 && y == 20) {
+    if (_colorRegions == nullptr) {
+        return pixelSet ? fallbackOnColorBe : fallbackOffColorBe;
     }
+
+    uint8_t regionCount = 0;
+    while (regionCount < 48 && _colorRegions[regionCount].enabled) {
+        regionCount++;
+    }
+
+    for (int16_t index = static_cast<int16_t>(regionCount) - 1; index >= 0; --index) {
+        const TFTColorRegion &region = _colorRegions[index];
+        if (x >= region.x && x < (region.x + region.width) && y >= region.y && y < (region.y + region.height)) {
             return pixelSet ? region.onColorBe : region.offColorBe;
         }
-        currentCount++;
     }
+
     return pixelSet ? fallbackOnColorBe : fallbackOffColorBe;
 }
 
