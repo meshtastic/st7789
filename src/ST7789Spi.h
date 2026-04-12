@@ -1,3 +1,4 @@
+@ -0,0 +1,514 @@
 /**
  * The MIT License (MIT)
  *
@@ -205,13 +206,14 @@ class ST7789Spi : public OLEDDisplay {
         yield();
        }
 
-       // If the minBoundY wasn't updated
-       // we can savely assume that buffer_back[pos] == buffer[pos]
-       // holdes true for all values of pos
-       if (minBoundY == UINT16_MAX) {
-         if (!colorRegionStateChanged) {
-           return;
-         }
+       // If no bitmap bits changed and color mapping also did not change, skip update.
+       if (minBoundY == UINT16_MAX && !colorRegionStateChanged) {
+         return;
+       }
+
+       // Color-region changes can alter visible colors even when bitmap bits
+       // outside dirty bounds stay the same; force full refresh in that case.
+       if (colorRegionStateChanged) {
          minBoundY = 0;
          maxBoundY = _buffheight - 1;
          minBoundX = 0;
