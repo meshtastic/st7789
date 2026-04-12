@@ -1,4 +1,3 @@
-@ -0,0 +1,514 @@
 /**
  * The MIT License (MIT)
  *
