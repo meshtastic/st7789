@@ -102,6 +102,14 @@ struct TFTColorRegion {
 #define rtos_malloc malloc
 //SPIClass SPI1(HSPI);
 #endif
+
+#ifndef rtos_malloc
+#define rtos_malloc malloc
+#endif
+
+#ifndef rtos_free
+#define rtos_free free
+#endif
 class ST7789Spi : public OLEDDisplay {
   private:
       uint8_t             _rst;
@@ -115,7 +123,13 @@ class ST7789Spi : public OLEDDisplay {
       SPISettings 		    _spiSettings;
       uint16_t            _RGB=0xFFFF;
       uint8_t             _buffheight;
+      uint16_t            *_scanlineBuf = nullptr;
+      uint16_t            _scanlineBufCapacity = 0;
+      uint16_t            *_rowOnColors = nullptr;
+      uint16_t            *_rowOffColors = nullptr;
+      uint16_t            _rowColorCapacity = 0;
       TFTColorRegion      *_colorRegions = nullptr;
+      uint8_t             _activeColorRegionCount = 0;
       uint32_t            _lastColorRegionHash = 0;
       bool                _hadColorRegionsLastFrame = false;
 
@@ -138,6 +152,23 @@ class ST7789Spi : public OLEDDisplay {
       _spiSettings = SPISettings(40000000, MSBFIRST, SPI_MODE0);
       setGeometry(g,width,height);
       setRGB(ST77XX_GREEN); // Default to Green, if color not explicity specified by Meshtastic firmware
+    }
+
+    virtual ~ST7789Spi() {
+      if (_scanlineBuf != nullptr) {
+        rtos_free(_scanlineBuf);
+        _scanlineBuf = nullptr;
+        _scanlineBufCapacity = 0;
+      }
+      if (_rowOnColors != nullptr) {
+        rtos_free(_rowOnColors);
+        _rowOnColors = nullptr;
+      }
+      if (_rowOffColors != nullptr) {
+        rtos_free(_rowOffColors);
+        _rowOffColors = nullptr;
+      }
+      _rowColorCapacity = 0;
     }
 
     bool connect(){
@@ -172,11 +203,12 @@ class ST7789Spi : public OLEDDisplay {
     void display(void) {
       const uint16_t fallbackOnColorBe = _RGB;
       const uint16_t fallbackOffColorBe = 0x0000;
-      const bool hasColorRegions = _colorRegions != nullptr;
-      const uint32_t colorRegionHash = hasColorRegions ? hashColorRegions() : 0;
-      const bool colorRegionStateChanged = (hasColorRegions != _hadColorRegionsLastFrame) ||
-                                           (hasColorRegions && colorRegionHash != _lastColorRegionHash);
-      _hadColorRegionsLastFrame = hasColorRegions;
+      _activeColorRegionCount = countColorRegions();
+      const bool hasActiveColorRegions = (_activeColorRegionCount > 0);
+      const uint32_t colorRegionHash = hasActiveColorRegions ? hashColorRegions() : 0;
+      const bool colorRegionStateChanged = (hasActiveColorRegions != _hadColorRegionsLastFrame) ||
+                                           (hasActiveColorRegions && colorRegionHash != _lastColorRegionHash);
+      _hadColorRegionsLastFrame = hasActiveColorRegions;
       _lastColorRegionHash = colorRegionHash;
     #ifdef OLEDDISPLAY_DOUBLE_BUFFER
 
@@ -222,28 +254,45 @@ class ST7789Spi : public OLEDDisplay {
 		  set_CS(LOW);
 		  _spi->beginTransaction(_spiSettings);
 
-          for (y = minBoundY; y <= maxBoundY; y++)
-          {
-            for(int temp = 0; temp<8;temp++)
-            {
-              //setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
-              setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
-              //setAddrWindow(y*8+temp,minBoundX,1,maxBoundX-minBoundX+1);
-              uint32_t const pixbufcount = maxBoundX-minBoundX+1;
-              uint16_t *pixbuf = (uint16_t *)rtos_malloc(2 * pixbufcount);
-              const int16_t pixelY = static_cast<int16_t>(y * 8 + temp);
-              for (x = minBoundX; x <= maxBoundX; x++)
-              {
-                    const bool pixelSet = ((buffer[x + y * displayWidth] >> temp) & 0x01) == 1;
-                    pixbuf[x - minBoundX] = resolveTFTColorPixel(static_cast<int16_t>(x), pixelY, pixelSet,
-                                                                           fallbackOnColorBe, fallbackOffColorBe);
+          uint32_t const pixbufcount = maxBoundX - minBoundX + 1;
+          ensureScanlineBuffer(pixbufcount);
+          if (_scanlineBuf == nullptr) {
+            _spi->endTransaction();
+            set_CS(HIGH);
+            return;
+          }
+          const bool useRowColorCache = (_activeColorRegionCount > 1);
+          if (useRowColorCache) {
+            ensureRowColorBuffers(static_cast<uint16_t>(pixbufcount));
+          }
+
+          const uint16_t rowStart = static_cast<uint16_t>(minBoundY * 8);
+          const uint16_t rowEndExclusive = min(displayHeight, static_cast<uint16_t>((maxBoundY + 1) * 8));
+          const uint16_t rowCount = rowEndExclusive > rowStart ? (rowEndExclusive - rowStart) : 0;
+          if (rowCount > 0) {
+            setAddrWindow(minBoundX, rowStart, pixbufcount, rowCount);
+            for (uint16_t pixelY = rowStart; pixelY < rowEndExclusive; pixelY++) {
+              const uint16_t srcY = pixelY >> 3;
+              const uint8_t bit = static_cast<uint8_t>(pixelY & 0x07);
+              const uint8_t bitMask = static_cast<uint8_t>(1u << bit);
+              const uint8_t *srcRow = &buffer[srcY * displayWidth];
+              if (useRowColorCache && _rowOnColors != nullptr && _rowOffColors != nullptr) {
+                prepareRowColors(static_cast<int16_t>(pixelY), static_cast<int16_t>(minBoundX), static_cast<int16_t>(maxBoundX),
+                                 fallbackOnColorBe, fallbackOffColorBe, _activeColorRegionCount);
+                for (x = minBoundX; x <= maxBoundX; x++) {
+                  const uint16_t idx = static_cast<uint16_t>(x - minBoundX);
+                  const bool pixelSet = (srcRow[x] & bitMask) != 0;
+                  _scanlineBuf[idx] = pixelSet ? _rowOnColors[idx] : _rowOffColors[idx];
+                }
+              } else {
+                for (x = minBoundX; x <= maxBoundX; x++) {
+                  const bool pixelSet = (srcRow[x] & bitMask) != 0;
+                  _scanlineBuf[x - minBoundX] =
+                      resolveTFTColorPixel(static_cast<int16_t>(x), static_cast<int16_t>(pixelY), pixelSet,
+                                           fallbackOnColorBe, fallbackOffColorBe, _activeColorRegionCount);
+                }
               }
-#ifdef ESP_PLATFORM
-              _spi->transferBytes((uint8_t *)pixbuf, NULL, 2 * pixbufcount);
-#else
-              _spi->transfer(pixbuf, NULL, 2 * pixbufcount);
-#endif
-              rtos_free(pixbuf);
+              transferPixels(_scanlineBuf, pixbufcount);
             }
           }
 	  _spi->endTransaction();
@@ -252,29 +301,39 @@ class ST7789Spi : public OLEDDisplay {
      #else
 		  set_CS(LOW);
 		  _spi->beginTransaction(_spiSettings);
-		uint8_t x, y;
-          for (y = 0; y < _buffheight; y++)
-          {
-            for(int temp = 0; temp<8;temp++)
-            {
-              //setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
-              //setAddrWindow(minBoundX,y*8+temp,maxBoundX-minBoundX+1,1);
-              setAddrWindow(y*8+temp,0,1,displayWidth);
-              uint32_t const pixbufcount = displayWidth;
-              uint16_t *pixbuf = (uint16_t *)rtos_malloc(2 * pixbufcount);
-              const int16_t pixelY = static_cast<int16_t>(y * 8 + temp);
-              for (x = 0; x < displayWidth; x++)
-              {
-                    const bool pixelSet = ((buffer[x + y * displayWidth] >> temp) & 0x01) == 1;
-                    pixbuf[x] = resolveTFTColorPixel(static_cast<int16_t>(x), pixelY, pixelSet, fallbackOnColorBe,
-                                                               fallbackOffColorBe);              }
-#ifdef ESP_PLATFORM
-              _spi->transferBytes((uint8_t *)pixbuf, NULL, 2 * pixbufcount);
-#else
-              _spi->transfer(pixbuf, NULL, 2 * pixbufcount);
-#endif
-              rtos_free(pixbuf);
+		uint16_t x;
+          uint32_t const pixbufcount = displayWidth;
+          ensureScanlineBuffer(pixbufcount);
+          if (_scanlineBuf == nullptr) {
+            _spi->endTransaction();
+            set_CS(HIGH);
+            return;
+          }
+          const bool useRowColorCache = (_activeColorRegionCount > 1);
+          if (useRowColorCache) {
+            ensureRowColorBuffers(static_cast<uint16_t>(pixbufcount));
+          }
+          setAddrWindow(0, 0, displayWidth, displayHeight);
+          for (uint16_t pixelY = 0; pixelY < displayHeight; pixelY++) {
+            const uint16_t srcY = pixelY >> 3;
+            const uint8_t bit = static_cast<uint8_t>(pixelY & 0x07);
+            const uint8_t bitMask = static_cast<uint8_t>(1u << bit);
+            const uint8_t *srcRow = &buffer[srcY * displayWidth];
+            if (useRowColorCache && _rowOnColors != nullptr && _rowOffColors != nullptr) {
+              prepareRowColors(static_cast<int16_t>(pixelY), 0, static_cast<int16_t>(displayWidth - 1), fallbackOnColorBe,
+                               fallbackOffColorBe, _activeColorRegionCount);
+              for (x = 0; x < displayWidth; x++) {
+                const bool pixelSet = (srcRow[x] & bitMask) != 0;
+                _scanlineBuf[x] = pixelSet ? _rowOnColors[x] : _rowOffColors[x];
+              }
+            } else {
+              for (x = 0; x < displayWidth; x++) {
+                const bool pixelSet = (srcRow[x] & bitMask) != 0;
+                _scanlineBuf[x] = resolveTFTColorPixel(static_cast<int16_t>(x), static_cast<int16_t>(pixelY), pixelSet,
+                                                       fallbackOnColorBe, fallbackOffColorBe, _activeColorRegionCount);
+              }
             }
+            transferPixels(_scanlineBuf, pixbufcount);
           }
 	  _spi->endTransaction();
 	  set_CS(HIGH);
@@ -449,6 +508,10 @@ class ST7789Spi : public OLEDDisplay {
         this->displayWidth = width > 0 ? width : 128;
         this->displayHeight = height > 0 ? height : 64;
         break;
+      default:
+        this->displayWidth = width > 0 ? width : 128;
+        this->displayHeight = height > 0 ? height : 64;
+        break;
     }
     uint8_t tmp=displayHeight % 8;
     uint8_t _buffheight=displayHeight / 8;
@@ -458,15 +521,19 @@ class ST7789Spi : public OLEDDisplay {
     this->displayBufferSize = displayWidth * _buffheight ;
   }
   
-uint16_t resolveTFTColorPixel(int16_t x, int16_t y, bool pixelSet, uint16_t fallbackOnColorBe, uint16_t fallbackOffColorBe)
+uint16_t resolveTFTColorPixel(int16_t x, int16_t y, bool pixelSet, uint16_t fallbackOnColorBe, uint16_t fallbackOffColorBe,
+                              uint8_t regionCount)
 {
-    if (_colorRegions == nullptr) {
+    if (_colorRegions == nullptr || regionCount == 0) {
         return pixelSet ? fallbackOnColorBe : fallbackOffColorBe;
     }
 
-    uint8_t regionCount = 0;
-    while (regionCount < 48 && _colorRegions[regionCount].enabled) {
-        regionCount++;
+    if (regionCount == 1) {
+        const TFTColorRegion &region = _colorRegions[0];
+        if (x >= region.x && x < (region.x + region.width) && y >= region.y && y < (region.y + region.height)) {
+            return pixelSet ? region.onColorBe : region.offColorBe;
+        }
+        return pixelSet ? fallbackOnColorBe : fallbackOffColorBe;
     }
 
     for (int16_t index = static_cast<int16_t>(regionCount) - 1; index >= 0; --index) {
@@ -483,15 +550,12 @@ uint32_t hashColorRegions() const
 {
     uint32_t hash = 2166136261u; // FNV-1a
 
-    if (_colorRegions == nullptr) {
+    if (_colorRegions == nullptr || _activeColorRegionCount == 0) {
         return hash;
     }
 
-    for (uint8_t i = 0; i < 48; i++) {
+    for (uint8_t i = 0; i < _activeColorRegionCount; i++) {
         const TFTColorRegion &region = _colorRegions[i];
-        if (!region.enabled) {
-            break;
-        }
 
         const uint16_t fields[] = {static_cast<uint16_t>(region.x), static_cast<uint16_t>(region.y),
                                    static_cast<uint16_t>(region.width), static_cast<uint16_t>(region.height),
@@ -507,6 +571,123 @@ uint32_t hashColorRegions() const
     }
 
     return hash;
+}
+
+uint8_t countColorRegions() const
+{
+    if (_colorRegions == nullptr) {
+        return 0;
+    }
+
+    uint8_t regionCount = 0;
+    while (regionCount < 48 && _colorRegions[regionCount].enabled) {
+        regionCount++;
+    }
+    return regionCount;
+}
+
+void ensureRowColorBuffers(uint16_t width)
+{
+    if (width <= _rowColorCapacity && _rowOnColors != nullptr && _rowOffColors != nullptr) {
+        return;
+    }
+
+    if (_rowOnColors != nullptr) {
+        rtos_free(_rowOnColors);
+        _rowOnColors = nullptr;
+    }
+    if (_rowOffColors != nullptr) {
+        rtos_free(_rowOffColors);
+        _rowOffColors = nullptr;
+    }
+    _rowColorCapacity = 0;
+
+    _rowOnColors = static_cast<uint16_t *>(rtos_malloc(width * sizeof(uint16_t)));
+    _rowOffColors = static_cast<uint16_t *>(rtos_malloc(width * sizeof(uint16_t)));
+    if (_rowOnColors != nullptr && _rowOffColors != nullptr) {
+        _rowColorCapacity = width;
+        return;
+    }
+
+    if (_rowOnColors != nullptr) {
+        rtos_free(_rowOnColors);
+        _rowOnColors = nullptr;
+    }
+    if (_rowOffColors != nullptr) {
+        rtos_free(_rowOffColors);
+        _rowOffColors = nullptr;
+    }
+}
+
+void prepareRowColors(int16_t pixelY, int16_t minX, int16_t maxX, uint16_t fallbackOnColorBe, uint16_t fallbackOffColorBe,
+                      uint8_t regionCount)
+{
+    if (_rowOnColors == nullptr || _rowOffColors == nullptr || minX > maxX) {
+        return;
+    }
+
+    const uint16_t width = static_cast<uint16_t>(maxX - minX + 1);
+    for (uint16_t i = 0; i < width; i++) {
+        _rowOnColors[i] = fallbackOnColorBe;
+        _rowOffColors[i] = fallbackOffColorBe;
+    }
+
+    if (_colorRegions == nullptr || regionCount == 0) {
+        return;
+    }
+
+    // Apply in forward order so later regions overwrite earlier ones.
+    for (uint8_t i = 0; i < regionCount; i++) {
+        const TFTColorRegion &region = _colorRegions[i];
+        if (pixelY < region.y || pixelY >= (region.y + region.height)) {
+            continue;
+        }
+
+        const int16_t regionStart = region.x;
+        const int16_t regionEnd = static_cast<int16_t>(region.x + region.width - 1);
+        const int16_t spanStart = max(minX, regionStart);
+        const int16_t spanEnd = min(maxX, regionEnd);
+        if (spanStart > spanEnd) {
+            continue;
+        }
+
+        uint16_t idx = static_cast<uint16_t>(spanStart - minX);
+        const uint16_t idxEnd = static_cast<uint16_t>(spanEnd - minX);
+        while (idx <= idxEnd) {
+            _rowOnColors[idx] = region.onColorBe;
+            _rowOffColors[idx] = region.offColorBe;
+            idx++;
+        }
+    }
+}
+
+void ensureScanlineBuffer(uint16_t width)
+{
+    if (width <= _scanlineBufCapacity && _scanlineBuf != nullptr) {
+        return;
+    }
+
+    if (_scanlineBuf != nullptr) {
+        rtos_free(_scanlineBuf);
+        _scanlineBuf = nullptr;
+        _scanlineBufCapacity = 0;
+    }
+
+    _scanlineBuf = static_cast<uint16_t *>(rtos_malloc(width * sizeof(uint16_t)));
+    if (_scanlineBuf != nullptr) {
+        _scanlineBufCapacity = width;
+    }
+}
+
+inline void transferPixels(uint16_t *pixbuf, uint32_t pixelCount)
+{
+#ifdef ESP_PLATFORM
+    _spi->transferBytes(reinterpret_cast<uint8_t *>(pixbuf), NULL, static_cast<uint32_t>(2 * pixelCount));
+#elif defined(ARDUINO_ARCH_ESP8266)
+    _spi->transfer(reinterpret_cast<void *>(pixbuf), static_cast<uint16_t>(2 * pixelCount));
+#else
+    _spi->transfer(reinterpret_cast<void *>(pixbuf), NULL, static_cast<uint32_t>(2 * pixelCount));
+#endif
 }
 
 };
