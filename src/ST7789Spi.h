@@ -179,6 +179,7 @@ class ST7789Spi : public OLEDDisplay {
       //pinMode(_ledA, OUTPUT);
       if (_cs != (uint8_t) -1) {
         pinMode(_cs, OUTPUT);
+        set_CS(HIGH);
       }  
       pinMode(_rst, OUTPUT);
 
@@ -251,14 +252,12 @@ class ST7789Spi : public OLEDDisplay {
          maxBoundX = displayWidth - 1;
        }
 
-		  set_CS(LOW);
-		  _spi->beginTransaction(_spiSettings);
+		  beginTransaction();
 
           uint32_t const pixbufcount = maxBoundX - minBoundX + 1;
           ensureScanlineBuffer(pixbufcount);
           if (_scanlineBuf == nullptr) {
-            _spi->endTransaction();
-            set_CS(HIGH);
+            endTransaction();
             return;
           }
           const bool useRowColorCache = (_activeColorRegionCount > 1);
@@ -295,18 +294,15 @@ class ST7789Spi : public OLEDDisplay {
               transferPixels(_scanlineBuf, pixbufcount);
             }
           }
-	  _spi->endTransaction();
-	  set_CS(HIGH);
+	  endTransaction();
 
      #else
-		  set_CS(LOW);
-		  _spi->beginTransaction(_spiSettings);
+		  beginTransaction();
 		uint16_t x;
           uint32_t const pixbufcount = displayWidth;
           ensureScanlineBuffer(pixbufcount);
           if (_scanlineBuf == nullptr) {
-            _spi->endTransaction();
-            set_CS(HIGH);
+            endTransaction();
             return;
           }
           const bool useRowColorCache = (_activeColorRegionCount > 1);
@@ -335,8 +331,7 @@ class ST7789Spi : public OLEDDisplay {
             }
             transferPixels(_scanlineBuf, pixbufcount);
           }
-	  _spi->endTransaction();
-	  set_CS(HIGH);
+	  endTransaction();
 
      #endif
     }
@@ -449,22 +444,30 @@ class ST7789Spi : public OLEDDisplay {
       }
     };
     inline void sendCommand(uint8_t com) __attribute__((always_inline)){
-      set_CS(HIGH);
+      if (com == DISPLAYON) {
+        com = ST77XX_DISPON;
+      } else if (com == DISPLAYOFF) {
+        com = ST77XX_DISPOFF;
+      }
+      beginTransaction();
       digitalWrite(_dc, LOW);
-      set_CS(LOW);
-      _spi->beginTransaction(_spiSettings);
       _spi->transfer(com);
-      _spi->endTransaction();
-      set_CS(HIGH);
       digitalWrite(_dc, HIGH);
+      endTransaction();
     }
     
     inline void WriteData(uint8_t data) __attribute__((always_inline)){
-        digitalWrite(_cs, LOW);
-        _spi->beginTransaction(_spiSettings);
+        beginTransaction();
         _spi->transfer(data);
+        endTransaction();
+    }
+    void beginTransaction() {
+        _spi->beginTransaction(_spiSettings);
+        set_CS(LOW);
+    }
+    void endTransaction() {
+        set_CS(HIGH);
         _spi->endTransaction();
-        digitalWrite(_cs, HIGH);
     }
    void SPI_WRITE32(uint32_t l)
    {
